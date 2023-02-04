@@ -1,9 +1,11 @@
 import {render, RenderPosition, remove} from '../framework/render.js';
+import UiBlocker from '../framework/ui-blocker/ui-blocker.js';
 import BoardView from '../view/board-view.js';
 import SortView from '../view/sort-view.js';
 import TaskListView from '../view/task-list-view.js';
 import LoadMoreButtonView from '../view/load-more-button-view.js';
 import NoTaskView from '../view/no-task-view.js';
+import LoadingView from '../view/loading-view.js';
 import TaskPresenter from './task-presenter.js';
 import NewTaskPresenter from './new-task-presenter.js';
 import {sortTaskUp, sortTaskDown} from '../utils/task.js';
@@ -11,6 +13,10 @@ import {filter} from '../utils/filter.js';
 import {SortType, UpdateType, UserAction, FilterType} from '../const.js';
 
 const TASK_COUNT_PER_STEP = 8;
+const TimeLimit = {
+  LOWER_LIMIT: 350,
+  UPPER_LIMIT: 1000,
+};
 
 export default class BoardPresenter {
   #boardContainer = null;
@@ -19,6 +25,7 @@ export default class BoardPresenter {
 
   #boardComponent = new BoardView();
   #taskListComponent = new TaskListView();
+  #loadingComponent = new LoadingView();
   #loadMoreButtonComponent = null;
   #sortComponent = null;
   #noTaskComponent = null;
@@ -28,6 +35,11 @@ export default class BoardPresenter {
   #newTaskPresenter = null;
   #currentSortType = SortType.DEFAULT;
   #filterType = FilterType.ALL;
+  #isLoading = true;
+  #uiBlocker = new UiBlocker({
+    lowerLimit: TimeLimit.LOWER_LIMIT,
+    upperLimit: TimeLimit.UPPER_LIMIT
+  });
 
   constructor({boardContainer, tasksModel, filterModel, onNewTaskDestroy}) {
     this.#boardContainer = boardContainer;
@@ -87,18 +99,37 @@ export default class BoardPresenter {
     this.#taskPresenter.forEach((presenter) => presenter.resetView());
   };
 
-  #handleViewAction = (actionType, updateType, update) => {
+  #handleViewAction = async (actionType, updateType, update) => {
+    this.#uiBlocker.block();
+
     switch (actionType) {
       case UserAction.UPDATE_TASK:
-        this.#tasksModel.updateTask(updateType, update);
+        this.#taskPresenter.get(update.id).setSaving();
+        try {
+          await this.#tasksModel.updateTask(updateType, update);
+        } catch(err) {
+          this.#taskPresenter.get(update.id).setAborting();
+        }
         break;
       case UserAction.ADD_TASK:
-        this.#tasksModel.addTask(updateType, update);
+        this.#newTaskPresenter.setSaving();
+        try {
+          await this.#tasksModel.addTask(updateType, update);
+        } catch(err) {
+          this.#newTaskPresenter.setAborting();
+        }
         break;
       case UserAction.DELETE_TASK:
-        this.#tasksModel.deleteTask(updateType, update);
+        this.#taskPresenter.get(update.id).setDeleting();
+        try {
+          await this.#tasksModel.deleteTask(updateType, update);
+        } catch(err) {
+          this.#taskPresenter.get(update.id).setAborting();
+        }
         break;
     }
+
+    this.#uiBlocker.unblock();
   };
 
   #handleModelEvent = (updateType, data) => {
@@ -112,6 +143,11 @@ export default class BoardPresenter {
         break;
       case UpdateType.MAJOR:
         this.#clearBoard({resetRenderedTaskCount: true, resetSortType: true});
+        this.#renderBoard();
+        break;
+      case UpdateType.INIT:
+        this.#isLoading = false;
+        remove(this.#loadingComponent);
         this.#renderBoard();
         break;
     }
@@ -150,6 +186,10 @@ export default class BoardPresenter {
     tasks.forEach((task) => this.#renderTask(task));
   }
 
+  #renderLoading() {
+    render(this.#loadingComponent, this.#boardComponent.element, RenderPosition.AFTERBEGIN);
+  }
+
   #renderNoTasks() {
     this.#noTaskComponent = new NoTaskView({
       filterType: this.#filterType
@@ -174,6 +214,7 @@ export default class BoardPresenter {
     this.#taskPresenter.clear();
 
     remove(this.#sortComponent);
+    remove(this.#loadingComponent);
     remove(this.#loadMoreButtonComponent);
 
     if (this.#noTaskComponent) {
@@ -196,6 +237,11 @@ export default class BoardPresenter {
 
   #renderBoard() {
     render(this.#boardComponent, this.#boardContainer);
+
+    if (this.#isLoading) {
+      this.#renderLoading();
+      return;
+    }
 
     const tasks = this.tasks;
     const taskCount = tasks.length;
